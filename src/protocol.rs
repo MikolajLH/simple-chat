@@ -1,4 +1,4 @@
-use std::{io::{self, Read}, net::TcpStream};
+use std::{io::{self, Read, Write}, net::TcpStream};
 
 //ENDIANNESS: "big"
 //FORMAT: "utf-8"
@@ -54,4 +54,39 @@ pub fn recv_msg_tcp(conn: &mut TcpStream) -> TcpRcv {
         Err(err) => TcpRcv::InvalidUtf(err),
         Ok(msg) => TcpRcv::Msg(msg),
     };
+}
+
+pub enum TcpSnd {
+    Good,
+    MsgTooLong,
+    IOError(io::Error),
+}
+impl TcpSnd {
+    pub fn to_string(&self) -> String {
+        match self {
+            Self::Good => String::from("<Sent successfull>"),
+            Self::MsgTooLong => {
+                String::from("<MsgTooLong: Msg too long, max message length is 2^32 bytes>")
+            }
+            Self::IOError(e) => format!("<IOError: {e:?}>"),
+        }
+    }
+}
+pub fn send_msg_tcp(conn: &mut TcpStream, msg: &str) -> TcpSnd {
+    let mut bmsg: Vec<u8> = Vec::new();
+
+    let msg_bytes = msg.as_bytes();
+    let msg_len: u32 = match msg_bytes.len().try_into() {
+        Ok(n) => n,
+        Err(_) => return TcpSnd::MsgTooLong,
+    };
+
+    let header: [u8; TCP_HEADER_LENGTH] = msg_len.to_be_bytes();
+    bmsg.extend_from_slice(&header);
+    bmsg.extend_from_slice(msg_bytes);
+
+    match conn.write_all(&bmsg) {
+        Ok(()) => return TcpSnd::Good,
+        Err(e) => return TcpSnd::IOError(e),
+    }
 }
