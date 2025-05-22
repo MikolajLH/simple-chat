@@ -1,5 +1,5 @@
 use std::{
-    io, net::Ipv4Addr, sync::mpsc::{self, Receiver, Sender}, thread
+    io, sync::mpsc::{self, Receiver, Sender},
 };
 
 use crossterm::event::{KeyCode, KeyEventKind};
@@ -36,7 +36,7 @@ enum AppMessage {
     ClientMsg(String),
     ErrorMsg(io::Error),
     Empty,
-    NotImplemented,
+    //NotImplemented,
 }
 // When the user inputs a string inside console, it is parsed and mapped into value from this enum
 // This enum acts as an interface of gateway for a user to interact with application
@@ -295,10 +295,26 @@ impl TUIApp {
         if !matches!(self.connection_status, ConnectionStatus::Disconnected) {
             return AppMessage::ErrorMsg(io::Error::other(format!("Already started")))
         }
-        //let _ = format!("{host}:{port}");
-        //return AppMessage::NotImplemented;
-        // // TODO: this function needs rewrite, its current form is to allow testing
-        let mut srv = server::Server::new(std::net::IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
+
+        if args.len() != 2 {
+            return AppMessage::ErrorMsg(io::Error::other(format!(":create takes exactly two arguments")));
+        }
+
+        let host: std::net::IpAddr = match args[0].parse() {
+            Ok(addr) => addr,
+            Err(err) => {
+                return AppMessage::ErrorMsg(io::Error::other(err));
+            },
+        };
+
+        let port: u16 = match args[1].parse() {
+            Ok(port) => port,
+            Err(err) => {
+                return AppMessage::ErrorMsg(io::Error::other(err));
+            }
+        };
+
+        let mut srv = server::Server::new(host, port);
 
         let app_tx = self.tx.clone();
         let srv_tx = srv.clone_tx();
@@ -316,18 +332,39 @@ impl TUIApp {
     }
 
     fn cmd_stop_hosted_server(&mut self, args: Vec<String>) -> AppMessage {
-        // TODO: implement this function
+        if args.len() != 0 {
+            return AppMessage::ErrorMsg(io::Error::other(format!(":shutdown takes exactly zero arguments")));
+        }
+
         if let ConnectionStatus::Hosted(tx) = &self.connection_status {
             tx.send(server::ServerEvent::Shutdown).unwrap();
             return AppMessage::LogMsg(format!("Sent shutdown"));
         }
-        return AppMessage::NotImplemented;
+        return AppMessage::ErrorMsg(io::Error::other(format!("server not created")));
     }
 
     fn cmd_connect_to_remote_server(&mut self, args: Vec<String>) -> AppMessage {
         if !matches!(self.connection_status, ConnectionStatus::Disconnected) {
             return AppMessage::ErrorMsg(io::Error::other(format!("already connected")))
         }
+
+        if args.len() != 2 {
+            return AppMessage::ErrorMsg(io::Error::other(format!(":join takes exactly two arguments")));
+        }
+
+        let host: std::net::IpAddr = match args[0].parse() {
+            Ok(addr) => addr,
+            Err(err) => {
+                return AppMessage::ErrorMsg(io::Error::other(err));
+            },
+        };
+
+        let port: u16 = match args[1].parse() {
+            Ok(port) => port,
+            Err(err) => {
+                return AppMessage::ErrorMsg(io::Error::other(err));
+            }
+        };
 
         let mut clt = client::Client::new();
 
@@ -336,8 +373,8 @@ impl TUIApp {
 
         std::thread::spawn(move || {
             clt.connect_and_run(
-                std::net::IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-                8080,
+                host,
+                port,
                 move |msg| {
                 app_tx
                     .send(AppEvent::ClientEvent(msg))
@@ -346,10 +383,14 @@ impl TUIApp {
         });
 
         self.connection_status = ConnectionStatus::Remote(clt_tx);
-        return AppMessage::LogMsg(format!("Client is running!"));
+        return AppMessage::Empty;
     }
 
     fn cmd_disconnect_from_remote_server(&mut self, args: Vec<String>) -> AppMessage {
+        if args.len() != 0 {
+            return AppMessage::ErrorMsg(io::Error::other(format!(":exit takes exactly zero arguments")));
+        }
+
         if let ConnectionStatus::Remote(tx) = &self.connection_status {            
             if let Err(err) = tx.send(client::ClientEvent::DisconnectAndExit){
                 self.connection_status = ConnectionStatus::Disconnected;
@@ -358,7 +399,7 @@ impl TUIApp {
             self.connection_status = ConnectionStatus::Disconnected;
             return AppMessage::LogMsg(format!("Sent shutdown"));
         }
-        return AppMessage::NotImplemented;
+        return AppMessage::ErrorMsg(io::Error::other(format!("not connected")));
     }
 
     // pulls the history from the chat
@@ -369,7 +410,7 @@ impl TUIApp {
     // }
 
     // Idea: optional argument to clear only selected kinds of AppMessages, like only remove AppMessages::Error
-    fn cmd_clear_screen(&mut self, args: Vec<String>) -> AppMessage {
+    fn cmd_clear_screen(&mut self, _: Vec<String>) -> AppMessage {
         self.messages.clear();
         return AppMessage::Empty;
     }
@@ -512,11 +553,11 @@ impl AppMessage {
                 }
                 Some(Text::from(text))
             }
-            Self::ErrorMsg(err) =>  Some(Text::from(format!("{err}")).red()),
+            Self::ErrorMsg(err) =>Some(Text::from(format!("{err}")).red()),
             Self::Empty => None,
-            Self::ServerMsg(msg) => Some(Text::from(format!("ServerMsg: {msg}")).yellow()),
+            Self::ServerMsg(msg) => Some(Text::from(format!("ServerMsg: {msg}")).green()),
             Self::ClientMsg(msg) => Some(Text::from(format!("ClientMsg: {msg}")).blue()),
-            _ => Some(Text::from("not implemented").yellow()),
+            //_ => Some(Text::from("not implemented").yellow()),
         }
     }
 }
