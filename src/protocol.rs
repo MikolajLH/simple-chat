@@ -12,13 +12,6 @@ pub enum TcpRcv {
     GracefullyClosed,
 }
 
-impl TcpRcv {
-    pub fn connection_closed(&self) -> bool {
-        // TODO
-        return true;
-    }
-}
-
 pub fn recv_msg_tcp(conn: &mut TcpStream) -> TcpRcv {
     let mut header = [0_u8; TCP_HEADER_LENGTH];
 

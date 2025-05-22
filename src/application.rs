@@ -32,7 +32,8 @@ use crate::{client, server::{self}};
 // It's supposed to be pushed into messages vector and be displayed inside console
 enum AppMessage {
     LogMsg(String),
-    ServerMsg,
+    ServerMsg(String),
+    ClientMsg(String),
     ErrorMsg(io::Error),
     Empty,
     NotImplemented,
@@ -53,21 +54,16 @@ enum AppCommand {
 }
 
 // The application can be in three(?) states:
-// - Disconnecetd
+// - Disconnected
 // - Connected to remote server
 // - hosting server by itself
 // This enum encapsulates the connection state of the application
 enum ConnectionStatus {
     Disconnected,
-    Remote,
+    Remote(Sender<client::ClientEvent>),
     Hosted(Sender<server::ServerEvent>),
 }
 
-enum ApplicationMode {
-    ClientMode,
-    ServerMode,
-    Undecided,
-}
 
 // Struct represeting the state of TUI Application
 // exit - while this flag is true, the application runs
@@ -103,6 +99,7 @@ struct InputField {
 enum AppEvent {
     KeyInput(crossterm::event::KeyEvent),
     ServerEvent(server::ServerMessage),
+    ClientEvent(client::ClientMessage),
     Error(io::Error),
 }
 
@@ -139,13 +136,8 @@ impl TUIApp {
             let good = match app_event {
                 AppEvent::KeyInput(e) => self.evnt_handle_key_input(e),
                 AppEvent::Error(err) => self.evnt_handle_error(err),
-                AppEvent::ServerEvent(server_event) => {
-                    // TODO: implement this correctly so it works in general
-                    self.messages
-                        .push(AppMessage::LogMsg(server_event.to_string()));
-
-                    Ok(())
-                }
+                AppEvent::ServerEvent(server_event) => self.evnt_handle_server_event(server_event),
+                AppEvent::ClientEvent(client_event) => self.evnt_handle_client_event(client_event),
             };
             // TODO: either map the error directly to AppMessage and push it to the vector or emit another AppEvent::Error
             good.expect("error occured while handling app events");
@@ -186,7 +178,15 @@ impl TUIApp {
     }
 
     //
-    fn evnt_handle_server_event(&mut self) -> io::Result<()> {
+    fn evnt_handle_server_event(&mut self, server_event: server::ServerMessage) -> io::Result<()> {
+        self.messages.push(AppMessage::LogMsg(server_event.to_string()));
+
+        return Ok(());
+    }
+
+    fn evnt_handle_client_event(&mut self, client_event: client::ClientMessage) -> io::Result<()> {
+        self.messages.push(AppMessage::LogMsg(client_event.to_string()));
+
         return Ok(());
     }
 }
@@ -248,7 +248,24 @@ impl TUIApp {
     }
 
     fn cmd_new_message(&mut self, msg: String) -> AppMessage {
-        return AppMessage::LogMsg(msg);
+        return match &self.connection_status {
+            ConnectionStatus::Disconnected => {
+                AppMessage::ErrorMsg(io::Error::other(format!("Unknown command, you are not connected, type :help to see possible commands")))
+            },
+            ConnectionStatus::Hosted(htx) => {
+                if htx.send(server::ServerEvent::MessageFromHost(msg)).is_err(){
+
+                }
+
+                AppMessage::Empty
+            },
+            ConnectionStatus::Remote(rtx) => {
+                if rtx.send(client::ClientEvent::SendMsg(msg)).is_err() {
+                    
+                }
+                AppMessage::Empty
+            }
+        };
     }
 
     fn cmd_unknown_command(&self, unknown: String) -> AppMessage {
@@ -256,6 +273,10 @@ impl TUIApp {
     }
 
     fn cmd_start_hosted_server(&mut self, args: Vec<String>) -> AppMessage {
+        
+        if !matches!(self.connection_status, ConnectionStatus::Disconnected) {
+            return AppMessage::ErrorMsg(io::Error::other(format!("Already started")))
+        }
         //let _ = format!("{host}:{port}");
         //return AppMessage::NotImplemented;
         // // TODO: this function needs rewrite, its current form is to allow testing
@@ -286,13 +307,35 @@ impl TUIApp {
     }
 
     fn cmd_connect_to_remote_server(&mut self, args: Vec<String>) -> AppMessage {
-        // TODO: implement this function
-        //let _ = format!("{host}:{port}");
-        return AppMessage::NotImplemented;
+        if !matches!(self.connection_status, ConnectionStatus::Disconnected) {
+            return AppMessage::ErrorMsg(io::Error::other(format!("Something is wrong")))
+        }
+
+        let mut clt = client::Client::new();
+
+        let app_tx = self.tx.clone();
+        let clt_tx = clt.clone_tx();
+
+        std::thread::spawn(move || {
+            clt.connect_and_run(
+                std::net::IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                8080,
+                move |msg| {
+                app_tx
+                    .send(AppEvent::ClientEvent(msg))
+                    .expect("Sender stopped working unexpectedly");
+            });
+        });
+
+        self.connection_status = ConnectionStatus::Remote(clt_tx);
+        return AppMessage::LogMsg(format!("Client is running!"));
     }
 
     fn cmd_disconnect_from_remote_server(&mut self, args: Vec<String>) -> AppMessage {
-        // TODO: implement this function
+        if let ConnectionStatus::Remote(tx) = &self.connection_status {            
+            tx.send(client::ClientEvent::DisconnectAndExit).unwrap();
+            return AppMessage::LogMsg(format!("Sent shutdown"));
+        }
         return AppMessage::NotImplemented;
     }
 
@@ -436,7 +479,8 @@ impl AppMessage {
             }
             Self::ErrorMsg(err) =>  Some(Text::from(format!("{err}")).red()),
             Self::Empty => None,
-            Self::ServerMsg => Some(Text::from("ServerMsg: not implemented").yellow()),
+            Self::ServerMsg(msg) => Some(Text::from(format!("ServerMsg: {msg}")).yellow()),
+            Self::ClientMsg(msg) => Some(Text::from(format!("ClientMsg: {msg}")).blue()),
             _ => Some(Text::from("not implemented").yellow()),
         }
     }

@@ -1,20 +1,29 @@
-use std::{io, net::{IpAddr, TcpListener, TcpStream}, sync::{mpsc::{self, Receiver, Sender}, Arc, Mutex}, thread};
+use std::{collections::HashMap, io, net::{IpAddr, SocketAddr, TcpListener, TcpStream}, sync::{mpsc::{self, Receiver, Sender}, Arc, Mutex}, thread};
 
 use crate::protocol;
 
+
+pub struct ConnectedClientInfo {
+    write_conn: TcpStream,
+    addr: SocketAddr,
+    nickname: Option<String>,
+}
 
 pub struct Server {
     host: IpAddr, port: u16,
     running: bool,
     listener_running: Arc<Mutex<bool>>,
+    connected_clients: HashMap<usize, ConnectedClientInfo>,
     tx: Sender<ServerEvent>,
     rx: Receiver<ServerEvent>,
 }
 
 pub enum ServerEvent {
-    NewConnection(TcpStream),
+    NewConnection(usize, TcpStream),
     ServerError(io::Error),
     MessageFromClient(usize, String),
+    MessageFromHost(String),
+    ClientDisconnected(bool, usize),
     Shutdown,
 }
 
@@ -31,6 +40,7 @@ impl Server {
             host, port,
             running: false,
             listener_running,
+            connected_clients: HashMap::new(),
             tx, rx
         };
     }
@@ -56,7 +66,7 @@ impl Server {
         thread::spawn(move || Server::th_connections_listener(listener, tx, stay_active));
         callback(ServerMessage::Info(format!("Listening for new connection at {}:{}", self.host, self.port)));
         
-        self.running = true;        
+        self.running = true;
         while self.running {
             let server_event = match self.rx.recv() {
                 Ok(e) => e,
@@ -66,10 +76,11 @@ impl Server {
                 }
             };
             let msg = match server_event {
-                ServerEvent::NewConnection(conn) => self.evnt_handle_new_connection(conn),
+                ServerEvent::NewConnection(cid, conn) => self.evnt_handle_new_connection(cid, conn),
                 ServerEvent::Shutdown => self.evnt_handle_shutdown(),
                 ServerEvent::MessageFromClient(id, msg) => self.evnt_handle_message_from_client(id, msg),
-
+                ServerEvent::MessageFromHost(msg) => self.evnt_handle_message_from_host(msg),
+                ServerEvent::ClientDisconnected(gracefully, client_id) => self.evnt_handle_client_diconnected(gracefully, client_id),
 
                 ServerEvent::ServerError(err) => ServerMessage::Error(err.to_string()),
             };
@@ -79,12 +90,35 @@ impl Server {
 }
 
 impl Server {
-    fn evnt_handle_new_connection(&mut self, conn: TcpStream) -> ServerMessage {
-        // TODO
-        return match conn.peer_addr() {
-            Ok(addr) => ServerMessage::Info(format!("new connection at {addr}")),
-            Err(err) => ServerMessage::Error(err.to_string()),
+    fn evnt_handle_new_connection(&mut self, cid: usize, conn: TcpStream) -> ServerMessage {
+        let read_conn = conn;
+
+        let write_conn = match read_conn.try_clone() {
+            Ok(sock) => sock,
+            Err(err) => {
+                return ServerMessage::Error(err.to_string());
+            }
         };
+
+        let addr = match read_conn.peer_addr() {
+            Ok(addr) => addr,
+            Err(err) => {
+                return ServerMessage::Error(err.to_string());
+            }
+        };
+
+        let msg = format!("new connection at {addr}");
+
+        self.connected_clients.insert(
+            cid, 
+            ConnectedClientInfo { 
+                write_conn, 
+                addr, 
+                nickname: None });
+        
+        let tx = self.tx.clone();
+        thread::spawn(move || Server::th_handle_client(cid, read_conn, tx));
+        return ServerMessage::Info(msg);
     }
 
     fn evnt_handle_shutdown(&mut self) -> ServerMessage {
@@ -95,16 +129,59 @@ impl Server {
 
 
     fn evnt_handle_message_from_client(&mut self, id: usize, msg: String) -> ServerMessage {
+        let cilent_info = match self.connected_clients.get_mut(&id) {
+            Some(c) => c,
+            None => {
+                return ServerMessage::Error(format!("No client info, that's weird"));
+            }
+        };
 
-
-        return  ServerMessage::Error(format!("Not implemented!"));
+        let nick = cilent_info.nickname.clone().unwrap_or(String::new());
+        // TODO: add function that formats message
+        let fmsg = format!("({})[{};{}]: {msg}", cilent_info.addr, id, nick);
+        self.send_to_others(Some(id), &fmsg);
+        return ServerMessage::Info(fmsg);
     }
+
+    fn evnt_handle_message_from_host(&mut self, msg: String) -> ServerMessage {
+        // TODO: add function that formats message
+        let fmsg = format!("({}:{})[0;]: {msg}", self.host, self.port);
+        self.send_to_others(None, &fmsg);
+        return ServerMessage::Info(fmsg);
+    }
+
+    fn evnt_handle_client_diconnected(&mut self, gracefully: bool, client_id: usize) -> ServerMessage {        
+        self.connected_clients.remove(&client_id);
+        if !gracefully{
+            return ServerMessage::Error(format!("Client {client_id} unexpectedly disconnected"));
+        } else {
+            return ServerMessage::Info(format!("Client {client_id} disconnected"));
+        }
+    }
+
 }
 
 impl Server {
     fn shutdown_listener(&mut self) {
         *self.listener_running.lock().unwrap() = false;
         let _ = TcpStream::connect((self.host, self.port));
+    }
+
+    fn send_to_others(&mut self, sender_id: Option<usize>, msg: &str) {
+        for (id, client) in self.connected_clients.iter_mut() {
+            if !sender_id.is_none_or(|v| v != *id) {
+                continue;
+            }
+
+            let good = match protocol::send_msg_tcp(&mut client.write_conn, &msg) {
+                protocol::TcpSnd::Good => Ok(()),
+                _ => self.tx.send( ServerEvent::ClientDisconnected(false, id.clone()))
+            };
+
+            if good.is_err(){
+                self.running = false;
+            }
+        }
     }
 }
 
@@ -120,15 +197,19 @@ impl Server {
         // When the server wants to kill the listener thread
         // it first set the shared stay_actice flat to false
         // and then it makes a dummy connection to itself so the listener thread wakes up and checks the shared flag
+        let mut clients_count: usize = 0;
         for new_conn in listener.incoming() {
             if *stay_active.lock().unwrap() == false {
                 // It doesn't matter if the channel no longer works, since the thread is shutting down anyway
                 // let _ = tx.send(ServerEvent::);
                 return ();
             }
-
+            
             if let Err(_) = match new_conn {
-                Ok(conn) => tx.send(ServerEvent::NewConnection(conn)),
+                Ok(conn) => {
+                    clients_count += 1;
+                    tx.send(ServerEvent::NewConnection(clients_count, conn))
+                },
                 Err(err) => tx.send(ServerEvent::ServerError(err)),
             } { return (); } 
             // If the channel no longer works, 
@@ -142,10 +223,31 @@ impl Server {
         let mut connected = true;
         while connected {
             let tcp_msg = protocol::recv_msg_tcp(&mut conn);
-            if tcp_msg.connection_closed() {
-                connected = false;
-            }
-            if tx.send(ServerEvent::MessageFromClient(id, format!("New Message :3"))).is_err() {
+            let event = match tcp_msg {
+                protocol::TcpRcv::GracefullyClosed => {
+                    connected = false;
+
+                    ServerEvent::ClientDisconnected(true, id)
+                },
+                protocol::TcpRcv::IOError(err) => {
+                    ServerEvent::ServerError(err)
+                },
+                protocol::TcpRcv::InvalidUtf(err) => {
+                    ServerEvent::ServerError(io::Error::other(err))
+                },
+                protocol::TcpRcv::ProtocolError => {
+                    connected = false;
+
+                    ServerEvent::ClientDisconnected(false, id)
+                }
+                protocol::TcpRcv::Msg(msg) => {
+
+
+                    ServerEvent::MessageFromClient(id, msg)
+                },
+            };
+
+            if tx.send(event).is_err() {
                 connected = false;
             }
         }
@@ -156,8 +258,8 @@ impl Server {
 impl ServerMessage {
     pub fn to_string(&self) -> String {
         return match self {
-            Self::Error(err) => format!("Error: {err}"),
-            Self::Info(info) => format!("Info: {info}"),
+            Self::Error(err) => format!("Server Error: {err}"),
+            Self::Info(info) => format!("Server Info: {info}"),
         };
     }
 }
