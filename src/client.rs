@@ -24,6 +24,7 @@ pub enum ClientMessage {
     MsgAck,
     Internal(String),
     Error(String),
+    CriticalError(String),
 }
 
 impl Client {
@@ -47,7 +48,7 @@ impl Client {
         let conn_tcp = match TcpStream::connect(server_addr){
             Ok(conn) => conn,
             Err(err) => {
-                callback(ClientMessage::Error(err.to_string()));
+                callback(ClientMessage::CriticalError(err.to_string()));
                 return;
             }
         };
@@ -56,7 +57,7 @@ impl Client {
         let read_conn = match conn_tcp.try_clone() {
             Ok(conn) => conn,
             Err(err) => {
-                callback(ClientMessage::Error(err.to_string()));
+                callback(ClientMessage::CriticalError(err.to_string()));
                 return;
             }
         };
@@ -67,7 +68,7 @@ impl Client {
             let client_event = match self.rx.recv() {
                 Ok(e) => e,
                 Err(err) => {
-                    callback(ClientMessage::Error(err.to_string()));
+                    callback(ClientMessage::CriticalError(err.to_string()));
                     return;
                 }
             };
@@ -99,7 +100,7 @@ impl Client {
     fn evnt_handle_recv_msg(&mut self, msg: protocol::TcpRcv) -> ClientMessage {
         let clnt_msg = match msg {
             protocol::TcpRcv::GracefullyClosed => ClientMessage::Internal(format!("gracefully closed")),
-            protocol::TcpRcv::IOError(err) => ClientMessage::Error(err.to_string()),
+            protocol::TcpRcv::IOError(err) => ClientMessage::CriticalError(err.to_string()),
             protocol::TcpRcv::InvalidUtf(err) => ClientMessage::Error(err.to_string()),
             protocol::TcpRcv::ProtocolError => ClientMessage::Error(format!("protocol error")),
 
@@ -112,7 +113,7 @@ impl Client {
         if let Some(write_conn) = &self.conn {
             self.running = false;
             if let Err(err) = write_conn.shutdown(std::net::Shutdown::Both) {
-                return ClientMessage::Error(err.to_string());
+                return ClientMessage::CriticalError(err.to_string());
             }
             return ClientMessage::Internal(format!("Client disconnected and exited"));
         }
@@ -140,6 +141,7 @@ impl ClientMessage {
             Self::Internal(info) => format!("Client Info: {info}"),
             Self::Msg(msg ) => format!("{msg}"),
             Self::MsgAck => format!(""),
+            Self::CriticalError(err) => format!("Client Critical Error: {err}"),
         };
     }
 }

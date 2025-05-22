@@ -23,13 +23,14 @@ pub enum ServerEvent {
     ServerError(io::Error),
     MessageFromClient(usize, String),
     MessageFromHost(String),
-    ClientDisconnected(bool, usize),
+    ClientDisconnected(Option<String>, usize),
     Shutdown,
 }
 
 pub enum ServerMessage {
     Info(String),
     Error(String),
+    CriticalError(String),
 }
 
 impl Server {
@@ -55,7 +56,7 @@ impl Server {
         let listener = match TcpListener::bind((self.host, self.port)) {
             Ok(listener) => listener,
             Err(err) => {
-                callback(ServerMessage::Error(err.to_string()));
+                callback(ServerMessage::CriticalError(err.to_string()));
                 return ();
             }
         };
@@ -71,7 +72,7 @@ impl Server {
             let server_event = match self.rx.recv() {
                 Ok(e) => e,
                 Err(err) => {
-                    callback(ServerMessage::Error(err.to_string()));
+                    callback(ServerMessage::CriticalError(err.to_string()));
                     return ();
                 }
             };
@@ -80,7 +81,7 @@ impl Server {
                 ServerEvent::Shutdown => self.evnt_handle_shutdown(),
                 ServerEvent::MessageFromClient(id, msg) => self.evnt_handle_message_from_client(id, msg),
                 ServerEvent::MessageFromHost(msg) => self.evnt_handle_message_from_host(msg),
-                ServerEvent::ClientDisconnected(gracefully, client_id) => self.evnt_handle_client_diconnected(gracefully, client_id),
+                ServerEvent::ClientDisconnected(err, client_id) => self.evnt_handle_client_diconnected(err, client_id),
 
                 ServerEvent::ServerError(err) => ServerMessage::Error(err.to_string()),
             };
@@ -150,13 +151,12 @@ impl Server {
         return ServerMessage::Info(fmsg);
     }
 
-    fn evnt_handle_client_diconnected(&mut self, gracefully: bool, client_id: usize) -> ServerMessage {        
+    fn evnt_handle_client_diconnected(&mut self, err: Option<String>, client_id: usize) -> ServerMessage {        
         self.connected_clients.remove(&client_id);
-        if !gracefully{
-            return ServerMessage::Error(format!("Client {client_id} unexpectedly disconnected"));
-        } else {
-            return ServerMessage::Info(format!("Client {client_id} disconnected"));
-        }
+        return match err {
+            Some(err_msg) => return ServerMessage::Error(format!("Client {client_id} unexpectedly disconnected:\n{err_msg}")),
+            None => ServerMessage::Info(format!("Client {client_id} disconnected")), 
+        };
     }
 
 }
@@ -175,7 +175,8 @@ impl Server {
 
             let good = match protocol::send_msg_tcp(&mut client.write_conn, &msg) {
                 protocol::TcpSnd::Good => Ok(()),
-                _ => self.tx.send( ServerEvent::ClientDisconnected(false, id.clone()))
+                protocol::TcpSnd::IOError(err) => self.tx.send(ServerEvent::ClientDisconnected(Some(err.to_string()), id.clone())),
+                protocol::TcpSnd::MsgTooLong => self.tx.send(ServerEvent::ServerError(io::Error::other(format!("Client's {id} message is too long to send"))))
             };
 
             if good.is_err(){
@@ -226,25 +227,15 @@ impl Server {
             let event = match tcp_msg {
                 protocol::TcpRcv::GracefullyClosed => {
                     connected = false;
-
-                    ServerEvent::ClientDisconnected(true, id)
+                    ServerEvent::ClientDisconnected(None, id)
                 },
                 protocol::TcpRcv::IOError(err) => {
-                    ServerEvent::ServerError(err)
-                },
-                protocol::TcpRcv::InvalidUtf(err) => {
-                    ServerEvent::ServerError(io::Error::other(err))
-                },
-                protocol::TcpRcv::ProtocolError => {
                     connected = false;
-
-                    ServerEvent::ClientDisconnected(false, id)
-                }
-                protocol::TcpRcv::Msg(msg) => {
-
-
-                    ServerEvent::MessageFromClient(id, msg)
+                    ServerEvent::ClientDisconnected(Some(err.to_string()), id)
                 },
+                protocol::TcpRcv::InvalidUtf(err) =>  ServerEvent::ServerError(io::Error::other(err)),
+                protocol::TcpRcv::ProtocolError => ServerEvent::ServerError(io::Error::other(format!("Protocol error"))),
+                protocol::TcpRcv::Msg(msg) => ServerEvent::MessageFromClient(id, msg),
             };
 
             if tx.send(event).is_err() {
@@ -260,6 +251,7 @@ impl ServerMessage {
         return match self {
             Self::Error(err) => format!("Server Error: {err}"),
             Self::Info(info) => format!("Server Info: {info}"),
+            Self::CriticalError(err) => format!("Server Critical Error: {err}"),
         };
     }
 }

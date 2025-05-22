@@ -54,17 +54,7 @@ pub enum TcpSnd {
     MsgTooLong,
     IOError(io::Error),
 }
-impl TcpSnd {
-    pub fn to_string(&self) -> String {
-        match self {
-            Self::Good => String::from("<Sent successfull>"),
-            Self::MsgTooLong => {
-                String::from("<MsgTooLong: Msg too long, max message length is 2^32 bytes>")
-            }
-            Self::IOError(e) => format!("<IOError: {e:?}>"),
-        }
-    }
-}
+
 pub fn send_msg_tcp(conn: &mut TcpStream, msg: &str) -> TcpSnd {
     let mut bmsg: Vec<u8> = Vec::new();
 

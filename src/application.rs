@@ -44,6 +44,8 @@ enum AppCommand {
     Unknown(String),
     Nothing,
     NewMessage(String),
+
+    ShowHelpMessage(Vec<String>),
     
     ClearScreen(Vec<String>),
     CreateHostedServer(Vec<String>),
@@ -179,13 +181,22 @@ impl TUIApp {
 
     //
     fn evnt_handle_server_event(&mut self, server_event: server::ServerMessage) -> io::Result<()> {
-        self.messages.push(AppMessage::LogMsg(server_event.to_string()));
+        // TODO
+        if let server::ServerMessage::CriticalError(_) = server_event{
+            self.cmd_stop_hosted_server(Vec::new());
+        }
+
+        self.messages.push(AppMessage::ServerMsg(server_event.to_string()));
 
         return Ok(());
     }
 
     fn evnt_handle_client_event(&mut self, client_event: client::ClientMessage) -> io::Result<()> {
-        self.messages.push(AppMessage::LogMsg(client_event.to_string()));
+        // TODO
+        if let client::ClientMessage::CriticalError(_) = client_event{
+            self.cmd_disconnect_from_remote_server(Vec::new());
+        }
+        self.messages.push(AppMessage::ClientMsg(client_event.to_string()));
 
         return Ok(());
     }
@@ -224,6 +235,7 @@ impl TUIApp {
                 ":shutdown" => AppCommand::ShutdownHostedServer(args),
                 ":join" => AppCommand::JoinRemoteServer(args),
                 ":exit" => AppCommand::DisconnectFromRemoteServer(args),
+                ":help" => AppCommand::ShowHelpMessage(args),
                 _ => AppCommand::Unknown(command),
             };
             return cmd;
@@ -241,6 +253,8 @@ impl TUIApp {
             AppCommand::CreateHostedServer(args) => self.cmd_start_hosted_server(args),
             AppCommand::ShutdownHostedServer(args) => self.cmd_stop_hosted_server(args),
 
+            AppCommand::ShowHelpMessage(args) => self.cmd_show_help_message(args),
+
             AppCommand::JoinRemoteServer(args) => self.cmd_connect_to_remote_server(args),
             AppCommand::DisconnectFromRemoteServer(args) => self.cmd_disconnect_from_remote_server(args),
             AppCommand::Nothing => AppMessage::Empty,
@@ -248,22 +262,26 @@ impl TUIApp {
     }
 
     fn cmd_new_message(&mut self, msg: String) -> AppMessage {
+        let cmsg = msg.clone();
         return match &self.connection_status {
             ConnectionStatus::Disconnected => {
-                AppMessage::ErrorMsg(io::Error::other(format!("Unknown command, you are not connected, type :help to see possible commands")))
+                AppMessage::ErrorMsg(io::Error::other(format!("Not connected,\ntype :help to see possible commands")))
             },
             ConnectionStatus::Hosted(htx) => {
-                if htx.send(server::ServerEvent::MessageFromHost(msg)).is_err(){
-
+                if let Err(err) = htx.send(server::ServerEvent::MessageFromHost(msg)) {
+                    self.connection_status = ConnectionStatus::Disconnected;
+                    return AppMessage::ErrorMsg(io::Error::other(err));
                 }
 
-                AppMessage::Empty
+                AppMessage::LogMsg(cmsg)
             },
             ConnectionStatus::Remote(rtx) => {
-                if rtx.send(client::ClientEvent::SendMsg(msg)).is_err() {
-                    
+                if let Err(err) = rtx.send(client::ClientEvent::SendMsg(msg)){
+                    self.connection_status = ConnectionStatus::Disconnected;
+                    return AppMessage::ErrorMsg(io::Error::other(err));
                 }
-                AppMessage::Empty
+                
+                AppMessage::LogMsg(cmsg)
             }
         };
     }
@@ -308,7 +326,7 @@ impl TUIApp {
 
     fn cmd_connect_to_remote_server(&mut self, args: Vec<String>) -> AppMessage {
         if !matches!(self.connection_status, ConnectionStatus::Disconnected) {
-            return AppMessage::ErrorMsg(io::Error::other(format!("Something is wrong")))
+            return AppMessage::ErrorMsg(io::Error::other(format!("already connected")))
         }
 
         let mut clt = client::Client::new();
@@ -333,7 +351,11 @@ impl TUIApp {
 
     fn cmd_disconnect_from_remote_server(&mut self, args: Vec<String>) -> AppMessage {
         if let ConnectionStatus::Remote(tx) = &self.connection_status {            
-            tx.send(client::ClientEvent::DisconnectAndExit).unwrap();
+            if let Err(err) = tx.send(client::ClientEvent::DisconnectAndExit){
+                self.connection_status = ConnectionStatus::Disconnected;
+                return AppMessage::ErrorMsg(io::Error::other(err));
+            }
+            self.connection_status = ConnectionStatus::Disconnected;
             return AppMessage::LogMsg(format!("Sent shutdown"));
         }
         return AppMessage::NotImplemented;
@@ -350,6 +372,19 @@ impl TUIApp {
     fn cmd_clear_screen(&mut self, args: Vec<String>) -> AppMessage {
         self.messages.clear();
         return AppMessage::Empty;
+    }
+
+    fn cmd_show_help_message(&mut self, _: Vec<String>) -> AppMessage {
+        let msg = 
+"
+- :help - display this message
+- :create <host> <port> - start hosted server
+- :join <host> <port> - join remote server
+- :shutdown - shutdown hosted server
+- :exit - disconnect from remote server
+- :cls - clear screen
+";
+        return AppMessage::LogMsg(String::from(msg));
     }
 }
 
@@ -473,7 +508,7 @@ impl AppMessage {
             Self::LogMsg(msg) => {
                 let mut text = Vec::new();
                 for line in msg.split("\n") {
-                    text.push(Line::from(line).green());
+                    text.push(Line::from(line).white());
                 }
                 Some(Text::from(text))
             }
