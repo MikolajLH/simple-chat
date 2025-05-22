@@ -30,6 +30,7 @@ pub enum ServerEvent {
 pub enum ServerMessage {
     Info(String),
     Error(String),
+    Msg(String),
     CriticalError(String),
 }
 
@@ -141,14 +142,14 @@ impl Server {
         // TODO: add function that formats message
         let fmsg = format!("({})[{};{}]: {msg}", cilent_info.addr, id, nick);
         self.send_to_others(Some(id), &fmsg);
-        return ServerMessage::Info(fmsg);
+        return ServerMessage::Msg(fmsg);
     }
 
     fn evnt_handle_message_from_host(&mut self, msg: String) -> ServerMessage {
         // TODO: add function that formats message
         let fmsg = format!("({}:{})[0;]: {msg}", self.host, self.port);
         self.send_to_others(None, &fmsg);
-        return ServerMessage::Info(fmsg);
+        return ServerMessage::Msg(fmsg);
     }
 
     fn evnt_handle_client_diconnected(&mut self, err: Option<String>, client_id: usize) -> ServerMessage {        
@@ -249,9 +250,10 @@ impl Server {
 impl ServerMessage {
     pub fn to_string(&self) -> String {
         return match self {
-            Self::Error(err) => format!("Server Error: {err}"),
-            Self::Info(info) => format!("Server Info: {info}"),
-            Self::CriticalError(err) => format!("Server Critical Error: {err}"),
+            Self::Error(err) => format!("Server Error:\n{err}"),
+            Self::Info(info) => format!("Server Info:\n{info}"),
+            Self::Msg(msg) => format!("{msg}"),
+            Self::CriticalError(err) => format!("Server Critical Error:\n{err}"),
         };
     }
 }

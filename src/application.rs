@@ -196,7 +196,10 @@ impl TUIApp {
         if let client::ClientMessage::CriticalError(_) = client_event{
             self.cmd_disconnect_from_remote_server(Vec::new());
         }
-        self.messages.push(AppMessage::ClientMsg(client_event.to_string()));
+
+        if !matches!(client_event, client::ClientMessage::MsgAck) {
+            self.messages.push(AppMessage::ClientMsg(client_event.to_string()));
+        }
 
         return Ok(());
     }
@@ -273,7 +276,8 @@ impl TUIApp {
                     return AppMessage::ErrorMsg(io::Error::other(err));
                 }
 
-                AppMessage::LogMsg(cmsg)
+                //AppMessage::LogMsg(cmsg)
+                AppMessage::Empty
             },
             ConnectionStatus::Remote(rtx) => {
                 if let Err(err) = rtx.send(client::ClientEvent::SendMsg(msg)){
@@ -543,7 +547,6 @@ impl InputField {
 
 impl AppMessage {
     // The style command maps the AppMessage to ratatui's Text widget
-    // TODO: Implement different styles for different enum kinds, e.g. Error should probably be red server maybe normal, logging maybe yellow and so on.
     fn style(&self) -> Option<Text> {
         match self {
             Self::LogMsg(msg) => {
@@ -553,11 +556,31 @@ impl AppMessage {
                 }
                 Some(Text::from(text))
             }
-            Self::ErrorMsg(err) =>Some(Text::from(format!("{err}")).red()),
+            Self::ServerMsg(msg) => {
+                let mut text = Vec::new();
+                for line in msg.split("\n") {
+                    text.push(Line::from(line).green());
+                }
+                Some(Text::from(text))
+            },
+            Self::ClientMsg(msg) => {
+                let mut text = Vec::new();
+                for line in msg.split("\n") {
+                    text.push(Line::from(line).blue());
+                }
+                Some(Text::from(text))
+            },
+            Self::ErrorMsg(err) => {
+                let serr: String = err.to_string();
+
+                let mut text = Vec::new();
+                for line in serr.split("\n") {
+                    let sline = String::from(line);
+                    text.push(Line::from(sline).red());
+                }
+                Some(Text::from(text))
+            }
             Self::Empty => None,
-            Self::ServerMsg(msg) => Some(Text::from(format!("ServerMsg: {msg}")).green()),
-            Self::ClientMsg(msg) => Some(Text::from(format!("ClientMsg: {msg}")).blue()),
-            //_ => Some(Text::from("not implemented").yellow()),
         }
     }
 }
